@@ -1,0 +1,201 @@
+// Prisma schema for the internal document management system (twp_document_system)
+// Datasource: Microsoft SQL Server
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlserver"
+}
+
+// ---------------------------------------------------------------------------
+// Access control
+// ---------------------------------------------------------------------------
+
+// UserRole: "ADMIN" (full access across all departments) | "STAFF" (own department only)
+// | "VIEWER" (read-only across all departments — view/preview/download/print, no create/edit/delete, no /admin access)
+// | "MANAGER" (same scope as STAFF, plus can approve documents in their own department and
+//   delete an approved document/attachment in their own department — see canDeleteDocument in access.ts)
+// SQL Server connector does not support native enums, so roles/statuses are plain strings.
+model User {
+  id           String  @id @default(cuid())
+  employeeCode String? @unique // รหัสพนักงาน (optional)
+  email        String  @unique
+  name         String
+  passwordHash String
+  avatarPath   String? // path/key ของรูปโปรไฟล์ (relative ต่อ storage/avatars), see src/lib/storage.ts
+  role         String  @default("STAFF")
+  isActive     Boolean @default(true)
+
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdDocuments  Document[]      @relation("DocumentCreatedBy")
+  approvedDocuments Document[]      @relation("DocumentApprovedBy")
+  auditLogs         DocumentAudit[]
+
+  // Extra document types this user may view across all departments (in
+  // addition to their own department's documents) — see DocumentTypeAccess.
+  documentTypeAccess DocumentTypeAccess[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([departmentId])
+}
+
+// ---------------------------------------------------------------------------
+// Organization
+// ---------------------------------------------------------------------------
+
+// หน่วยงาน
+model Department {
+  id   String @id @default(cuid())
+  code String @unique // รหัสหน่วยงาน เช่น "HR", "IT"
+  name String // ชื่อหน่วยงาน
+
+  isActive Boolean @default(true)
+
+  users     User[]
+  documents Document[]
+
+  // ประเภทเอกสารที่หน่วยงานนี้เป็น "เจ้าของ" (มีสิทธิ์สร้างเอกสารประเภทนั้น)
+  ownedDocumentTypes DocumentType[] @relation("DocumentTypeOwner")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ประเภทเอกสาร
+model DocumentType {
+  id   String @id @default(cuid())
+  code String @unique // รหัสประเภท เช่น "MEMO", "CONTRACT"
+  name String // ชื่อประเภทเอกสาร
+
+  // running-number config used when generating เลขที่เอกสาร, e.g. "{code}-{year}-{seq:4}"
+  numberFormat String @default("{code}-{year}-{seq:4}")
+  isActive     Boolean @default(true)
+
+  // หน่วยงานเจ้าของประเภทเอกสารนี้ — มีเพียงหน่วยงานนี้ (หรือ admin) เท่านั้นที่สร้างเอกสารประเภทนี้ได้
+  // ถ้าเป็น null ทุกหน่วยงานสร้างเอกสารประเภทนี้ได้ตามปกติ
+  ownerDepartmentId String?
+  ownerDepartment   Department? @relation("DocumentTypeOwner", fields: [ownerDepartmentId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  documents Document[]
+  userAccess DocumentTypeAccess[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerDepartmentId])
+}
+
+// ให้สิทธิ์ user ดูเอกสารประเภทนี้ได้ข้ามหน่วยงาน (นอกเหนือจากเอกสารของหน่วยงานตัวเอง)
+// เช่น ผู้ใช้ฝ่ายบัญชีได้รับสิทธิ์ดูประเภท "ใบกำกับภาษี" จากทุกหน่วยงาน
+model DocumentTypeAccess {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  documentTypeId String
+  documentType   DocumentType @relation(fields: [documentTypeId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, documentTypeId])
+  @@index([documentTypeId])
+}
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+// DocumentStatus: "DRAFT" | "ACTIVE" | "ARCHIVED"
+model Document {
+  id String @id @default(cuid())
+
+  // เลขที่เอกสาร - unique, primary search key
+  documentNumber String @unique
+
+  title       String
+  description String? @db.NVarChar(Max)
+  status      String  @default("ACTIVE")
+
+  documentTypeId String
+  documentType   DocumentType @relation(fields: [documentTypeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  documentDate DateTime // วันที่ของเอกสาร (เช่น วันที่ลงนาม)
+
+  createdById String
+  createdBy   User   @relation("DocumentCreatedBy", fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // ถ้า approvedAt ไม่เป็น null แปลว่าเอกสารนี้ "ถูกต้องแล้ว" — ลบเอกสาร/ไฟล์แนบไม่ได้
+  // ยกเว้น ADMIN หรือ MANAGER ของหน่วยงานเดียวกับเอกสารนี้ (ดู canDeleteDocument ใน access.ts)
+  approvedAt   DateTime?
+  approvedById String?
+  approvedBy   User?     @relation("DocumentApprovedBy", fields: [approvedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  files     DocumentFile[]
+  auditLogs DocumentAudit[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // เลขที่เอกสารคือ primary search key; ดัชนีเพิ่มเติมรองรับการค้นตามหน่วยงาน/ประเภท/สถานะ
+  @@index([departmentId])
+  @@index([documentTypeId])
+  @@index([status])
+  @@index([documentDate])
+}
+
+// ไฟล์แนบของเอกสาร (รองรับหลายไฟล์ต่อ 1 เอกสาร)
+model DocumentFile {
+  id String @id @default(cuid())
+
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  fileName    String // ชื่อไฟล์ต้นฉบับ
+  storagePath String // path/key ที่เก็บจริงบน disk หรือ object storage
+  mimeType    String
+  sizeBytes   Int
+
+  uploadedAt DateTime @default(now())
+
+  @@index([documentId])
+}
+
+// audit trail: บันทึกการสร้าง/ลบ/ดาวน์โหลดเอกสาร
+// action: "CREATE" | "UPDATE" | "DOWNLOAD" | "DELETE" | "ARCHIVE" | "APPROVE"
+//
+// documentId เป็น nullable + onDelete: SetNull (ไม่ใช่ Cascade) โดยตั้งใจ —
+// ถ้า cascade ไปด้วย แถว audit ของการ "ลบ" เอกสารจะถูกลบทิ้งไปพร้อมกับเอกสารที่มันบันทึกไว้
+// ทำให้ตรวจสอบย้อนหลังไม่ได้ว่าใครลบเอกสารไปเมื่อไหร่ — จึงเก็บ documentNumber/documentTitle
+// เป็น snapshot ไว้ในแถวเองด้วย เพื่อให้ log ยังอ่านได้แม้เอกสารต้นฉบับถูกลบไปแล้ว
+model DocumentAudit {
+  id String @id @default(cuid())
+
+  documentId String?
+  document   Document? @relation(fields: [documentId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  documentNumber String // snapshot ตอน log ถูกสร้าง ใช้แสดงผลได้แม้เอกสารถูกลบไปแล้ว
+  documentTitle  String
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  action String
+  detail String?
+
+  createdAt DateTime @default(now())
+
+  @@index([documentId])
+  @@index([userId])
+  @@index([createdAt])
+}
