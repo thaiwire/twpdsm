@@ -1848,6 +1848,24 @@ export function canDeleteDocument(
   return canApproveDocument(user, documentDepartmentId);
 }
 
+/**
+ * Can edit a document's fields, or add/remove attachments on it. Same gate as
+ * canDeleteDocument — once approved, only ADMIN or a MANAGER in the same
+ * department may still change it (a plain STAFF member can no longer edit an
+ * approved document, even the one they created). Kept as a distinct function
+ * from canDeleteDocument (even though the rule is currently identical) since
+ * "who can edit" and "who can delete" are separate questions that could
+ * diverge later — don't collapse them into one just because they match today.
+ */
+export function canEditDocument(
+  user: SessionUser,
+  documentDepartmentId: string,
+  isApproved: boolean
+) {
+  if (!isApproved) return canManageDocument(user, documentDepartmentId);
+  return canApproveDocument(user, documentDepartmentId);
+}
+
 export function isAdmin(user: SessionUser) {
   return user.role === "ADMIN";
 }
@@ -1864,6 +1882,7 @@ export function isAdmin(user: SessionUser) {
 | `canManageDocument` | สร้าง/แก้ไขเอกสารของหน่วยงานนี้ได้ไหม | ใช้ภายใน `canDeleteDocument` |
 | `canApproveDocument` | อนุมัติเอกสารได้ไหม | ปุ่ม/action อนุมัติ |
 | `canDeleteDocument` | ลบเอกสาร/ไฟล์แนบได้ไหม (ขึ้นกับสถานะอนุมัติ) | ปุ่ม/action ลบ |
+| `canEditDocument` | แก้ไขข้อมูลเอกสาร / เพิ่มไฟล์แนบได้ไหม (ขึ้นกับสถานะอนุมัติ) | ปุ่ม "แก้ไข", หน้า `/documents/[id]/edit`, action `updateDocument`/`uploadDocumentFiles` |
 
 **`SessionUser`** — type ที่มีแค่ 3 field ที่จำเป็น → `session.user` ส่งเข้ามาได้เลย (มี field มากกว่าก็ได้ TypeScript ยอม)
 
@@ -1881,6 +1900,15 @@ export function isAdmin(user: SessionUser) {
 ```
 ยังไม่อนุมัติ → ใช้กฎปกติ (canManageDocument): ADMIN หรือคนในหน่วยงานเดียวกัน (ยกเว้น VIEWER)
 อนุมัติแล้ว  → ใช้กฎเข้มกว่า (canApproveDocument): ADMIN หรือ MANAGER ของหน่วยงานเดียวกันเท่านั้น
+```
+
+**`canEditDocument` — กฎเหมือน `canDeleteDocument` ทุกประการ แต่แยกเป็นอีกฟังก์ชันโดยตั้งใจ**: "ใครแก้ไขได้" กับ "ใครลบได้" เป็นคนละคำถาม วันนี้กฎบังเอิญตรงกัน แต่วันหน้าอาจต่างกันได้ (เช่น ให้ STAFF แก้ไขเอกสารที่อนุมัติแล้วได้แต่ลบไม่ได้) ถ้ารวมเป็นฟังก์ชันเดียวตั้งแต่ตอนนี้ วันที่ต้องแยกจะต้องไล่หาทุกจุดที่เรียกใช้ใหม่หมด — **อย่ารวมฟังก์ชันสิทธิ์เพียงเพราะตอนนี้ logic เหมือนกัน**
+
+ผลของสองฟังก์ชันนี้รวมกับการอนุมัติ คือ flow นี้:
+
+```
+STAFF สร้าง/แก้ไข/ลบได้ → MANAGER อนุมัติ → ล็อก (STAFF แก้ไข/ลบไม่ได้)
+    → ถ้าต้องแก้จริงๆ MANAGER กด "ยกเลิกการอนุมัติ" → กลับไปแก้ไขได้ → อนุมัติใหม่
 ```
 
 **กฎทอง**: ใช้ฟังก์ชันเหล่านี้ **ทั้งสองฝั่ง** — ฝั่ง UI (ซ่อนปุ่ม) และฝั่ง server action/API route (ตรวจซ้ำก่อนทำจริง) — ซ่อนปุ่มอย่างเดียวไม่พอ เพราะคนสามารถยิง request ตรงๆ ได้
@@ -1910,9 +1938,9 @@ export async function requireAdmin() {
 
 ลำดับการสร้างไฟล์ใน step นี้:
 
-1. Component ที่ใช้ร่วมกัน 6 ตัว (9.1–9.6)
+1. Component ที่ใช้ร่วมกัน 7 ตัว (9.1–9.6 รวม 9.5.1)
 2. Server actions ของเอกสาร (9.7)
-3. หน้า list (9.8) → หน้าสร้าง (9.9) → หน้า detail (9.10)
+3. หน้า list (9.8) → หน้าสร้าง (9.9) → หน้า detail (9.10) → หน้าแก้ไข (9.10.1)
 4. API route ดาวน์โหลด/พรีวิวไฟล์ (9.11)
 
 ### 9.1 ไฟล์ `src/components/FormattedDate.tsx` — แสดงวันที่ dd/mm/yyyy
@@ -2280,7 +2308,112 @@ export function ApproveButton({
 }
 ```
 
-อธิบาย: โครงสร้างเหมือน `DeleteButton` ทุกอย่าง (modal ยืนยัน + `useTransition` + `router.refresh()`) ต่างแค่สี (เขียว) และข้อความ — ข้อความยืนยัน **เตือนผลที่ตามมา** ว่าอนุมัติแล้วลบได้เฉพาะหัวหน้างาน/admin เพราะการอนุมัติเป็น one-way (ไม่มีปุ่มยกเลิกอนุมัติ)
+อธิบาย: โครงสร้างเหมือน `DeleteButton` ทุกอย่าง (modal ยืนยัน + `useTransition` + `router.refresh()`) ต่างแค่สี (เขียว) และข้อความ — ข้อความยืนยัน **เตือนผลที่ตามมา** ว่าอนุมัติแล้วลบได้เฉพาะหัวหน้างาน/admin (STAFF ที่ต้องการแก้เอกสารที่อนุมัติแล้ว ต้องให้หัวหน้างานกด "ยกเลิกการอนุมัติ" ก่อน — ดู 9.5.1)
+
+### 9.5.1 ไฟล์ `src/components/UnapproveButton.tsx` — ปุ่มยกเลิกการอนุมัติ
+
+```tsx
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+
+export function UnapproveButton({
+  id,
+  itemLabel,
+  action,
+}: {
+  id: string;
+  itemLabel: string;
+  action: (id: string) => Promise<{ error?: string }>;
+}) {
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function handleConfirm() {
+    startTransition(async () => {
+      const result = await action(id);
+      if (result.error) {
+        setError(result.error);
+      } else {
+        setOpen(false);
+        router.refresh();
+      }
+    });
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          setError(null);
+          setOpen(true);
+        }}
+        className="rounded-md border border-amber-300 px-4 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-50"
+      >
+        ยกเลิกการอนุมัติ
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-sm rounded-lg bg-white p-6 shadow-xl">
+            {error ? (
+              <>
+                <h2 className="text-base font-semibold text-gray-900">ไม่สามารถยกเลิกการอนุมัติได้</h2>
+                <p className="mt-2 text-sm text-gray-600">{error}</p>
+                <div className="mt-6 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setOpen(false)}
+                    className="rounded-md bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
+                  >
+                    ปิด
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="text-base font-semibold text-gray-900">ยืนยันการยกเลิกอนุมัติ</h2>
+                <p className="mt-2 text-sm text-gray-600">
+                  ต้องการยกเลิกการอนุมัติ &ldquo;{itemLabel}&rdquo; ใช่หรือไม่? เอกสารจะกลับไปเป็นสถานะรออนุมัติ
+                  และเจ้าหน้าที่ในหน่วยงานจะสามารถแก้ไขเอกสารหรือไฟล์แนบได้อีกครั้ง
+                </p>
+                <div className="mt-6 flex justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setOpen(false)}
+                    disabled={isPending}
+                    className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    ยกเลิก
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirm}
+                    disabled={isPending}
+                    className="rounded-md bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+                  >
+                    {isPending ? "กำลังยกเลิก..." : "ยืนยันยกเลิกอนุมัติ"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+```
+
+อธิบาย:
+- โครงสร้างเหมือน `ApproveButton` ทุกอย่าง ต่างแค่สี **amber (เหลืองส้ม)** — สีเตือน เพราะเป็นการ "ปลดล็อก" เอกสารที่ถูกตรวจแล้ว ไม่ใช่การกระทำปกติ
+- ข้อความยืนยันบอกผลที่ตามมาชัดเจน: เอกสารกลับเป็น "รออนุมัติ" และเจ้าหน้าที่ในหน่วยงานกลับมาแก้ไข/ลบได้
+- ยังใช้ `router.refresh()` หลังสำเร็จ เหตุผลเดียวกับ `DeleteButton` (เรียก action ผ่าน `startTransition` Next.js จึงไม่ re-render ให้เอง)
+- **ทำไมไม่รวม `ApproveButton` กับ `UnapproveButton` เป็น component เดียว** — รวมได้ (ส่ง prop สี/ข้อความ) แต่แยกไว้อ่านง่ายกว่าสำหรับผู้เรียน ถ้าจะรวม ให้รวม `DeleteButton` เข้าไปด้วยเป็น `ConfirmActionButton` ตัวเดียว
 
 ### 9.6 ไฟล์ `src/components/FilePreview.tsx` — พรีวิว PDF/รูปภาพ + พิมพ์
 
@@ -2387,11 +2520,12 @@ export function FilePreview({
 ```ts
 "use server";
 
+import { redirect, notFound } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { auth } from "@/lib/auth";
-import { canDeleteDocument, canApproveDocument } from "@/lib/access";
+import { canDeleteDocument, canApproveDocument, canEditDocument } from "@/lib/access";
 import { prisma } from "@/lib/prisma";
-import { deleteDocumentFile } from "@/lib/storage";
+import { deleteDocumentFile, saveDocumentFile, MAX_UPLOAD_SIZE_MB, MAX_UPLOAD_SIZE_BYTES } from "@/lib/storage";
 
 export async function deleteDocument(id: string): Promise<{ error?: string }> {
   const session = await auth();
@@ -2483,6 +2617,161 @@ export async function deleteDocumentAttachment(fileId: string): Promise<{ error?
   return {};
 }
 
+export async function updateDocument(id: string, formData: FormData): Promise<void> {
+  const session = await auth();
+  if (!session?.user) {
+    redirect(`/documents/${id}/edit?error=${encodeURIComponent("กรุณาเข้าสู่ระบบ")}`);
+  }
+
+  const document = await prisma.document.findUnique({ where: { id } });
+
+  if (!document) {
+    notFound();
+  }
+
+  if (!canEditDocument(session.user, document.departmentId, document.approvedAt !== null)) {
+    const message = document.approvedAt
+      ? "เอกสารนี้ถูกอนุมัติแล้ว แก้ไขได้เฉพาะหัวหน้างานของหน่วยงานนี้หรือผู้ดูแลระบบ"
+      : "ไม่มีสิทธิ์แก้ไขเอกสารนี้";
+    redirect(`/documents/${id}/edit?error=${encodeURIComponent(message)}`);
+  }
+
+  const title = formData.get("title")?.toString().trim();
+  const documentDateRaw = formData.get("documentDate")?.toString();
+  const description = formData.get("description")?.toString().trim() || null;
+
+  if (!title) {
+    redirect(`/documents/${id}/edit?error=${encodeURIComponent("กรุณาระบุชื่อเอกสาร")}`);
+  }
+  if (!documentDateRaw) {
+    redirect(`/documents/${id}/edit?error=${encodeURIComponent("กรุณาระบุวันที่เอกสาร")}`);
+  }
+
+  await prisma.$transaction([
+    prisma.document.update({
+      where: { id },
+      data: { title, description, documentDate: new Date(documentDateRaw) },
+    }),
+    prisma.documentAudit.create({
+      data: {
+        documentId: document.id,
+        documentNumber: document.documentNumber,
+        documentTitle: title,
+        userId: session.user.id,
+        action: "UPDATE",
+      },
+    }),
+  ]);
+
+  revalidatePath(`/documents/${id}`);
+  redirect(`/documents/${id}`);
+}
+
+export async function uploadDocumentFiles(id: string, formData: FormData): Promise<void> {
+  const session = await auth();
+  if (!session?.user) {
+    redirect(`/documents/${id}/edit?error=${encodeURIComponent("กรุณาเข้าสู่ระบบ")}`);
+  }
+
+  const document = await prisma.document.findUnique({ where: { id } });
+
+  if (!document) {
+    notFound();
+  }
+
+  if (!canEditDocument(session.user, document.departmentId, document.approvedAt !== null)) {
+    const message = document.approvedAt
+      ? "เอกสารนี้ถูกอนุมัติแล้ว เพิ่มไฟล์แนบได้เฉพาะหัวหน้างานของหน่วยงานนี้หรือผู้ดูแลระบบ"
+      : "ไม่มีสิทธิ์เพิ่มไฟล์แนบให้เอกสารนี้";
+    redirect(`/documents/${id}/edit?error=${encodeURIComponent(message)}`);
+  }
+
+  const files = formData.getAll("files").filter((f): f is File => f instanceof File && f.size > 0);
+
+  if (files.length === 0) {
+    redirect(`/documents/${id}/edit?error=${encodeURIComponent("กรุณาเลือกไฟล์ที่จะอัปโหลด")}`);
+  }
+
+  for (const file of files) {
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      redirect(
+        `/documents/${id}/edit?error=${encodeURIComponent(
+          `ไฟล์ ${file.name} มีขนาดเกิน ${MAX_UPLOAD_SIZE_MB}MB`
+        )}`
+      );
+    }
+  }
+
+  for (const file of files) {
+    const data = Buffer.from(await file.arrayBuffer());
+    const saved = await saveDocumentFile(document.id, file.name, data);
+    await prisma.$transaction([
+      prisma.documentFile.create({
+        data: {
+          documentId: document.id,
+          fileName: file.name,
+          mimeType: file.type || "application/octet-stream",
+          sizeBytes: data.byteLength,
+          storagePath: saved.storagePath,
+        },
+      }),
+      prisma.documentAudit.create({
+        data: {
+          documentId: document.id,
+          documentNumber: document.documentNumber,
+          documentTitle: document.title,
+          userId: session.user.id,
+          action: "UPDATE",
+          detail: file.name,
+        },
+      }),
+    ]);
+  }
+
+  revalidatePath(`/documents/${id}`);
+  redirect(`/documents/${id}`);
+}
+
+export async function unapproveDocument(id: string): Promise<{ error?: string }> {
+  const session = await auth();
+  if (!session?.user) {
+    return { error: "กรุณาเข้าสู่ระบบ" };
+  }
+
+  const document = await prisma.document.findUnique({ where: { id } });
+
+  if (!document) {
+    return { error: "ไม่พบเอกสารนี้" };
+  }
+
+  if (!canApproveDocument(session.user, document.departmentId)) {
+    return { error: "มีเพียงหัวหน้างานของหน่วยงานนี้หรือผู้ดูแลระบบเท่านั้นที่ยกเลิกการอนุมัติได้" };
+  }
+
+  if (!document.approvedAt) {
+    return { error: "เอกสารนี้ยังไม่ได้รับการอนุมัติ" };
+  }
+
+  await prisma.$transaction([
+    prisma.document.update({
+      where: { id },
+      data: { approvedAt: null, approvedById: null },
+    }),
+    prisma.documentAudit.create({
+      data: {
+        documentId: document.id,
+        documentNumber: document.documentNumber,
+        documentTitle: document.title,
+        userId: session.user.id,
+        action: "UNAPPROVE",
+      },
+    }),
+  ]);
+
+  revalidatePath(`/documents/${id}`);
+  return {};
+}
+
 export async function approveDocument(id: string): Promise<{ error?: string }> {
   const session = await auth();
   if (!session?.user) {
@@ -2525,7 +2814,8 @@ export async function approveDocument(id: string): Promise<{ error?: string }> {
 ```
 
 อธิบาย:
-- **`"use server"` บนสุดของไฟล์** — ทุกฟังก์ชันที่ export จากไฟล์นี้เป็น Server Action → Client Component (`DeleteButton`, `ApproveButton`) เรียกได้
+- **`"use server"` บนสุดของไฟล์** — ทุกฟังก์ชันที่ export จากไฟล์นี้เป็น Server Action → Client Component (`DeleteButton`, `ApproveButton`, `UnapproveButton`) และฟอร์มในหน้าแก้ไขเรียกได้
+- **action ในไฟล์นี้มี 2 แบบ**: แบบที่ปุ่ม client เรียก (`deleteDocument`, `deleteDocumentAttachment`, `approveDocument`, `unapproveDocument`) return `{ error? }` ให้ modal แสดง, แบบที่ `<form action>` เรียก (`updateDocument`, `uploadDocumentFiles`) ใช้ `redirect` กลับพร้อม `?error=`
 - **ทุก action เริ่มด้วยรูปแบบเดียวกัน** (จำไว้ใช้กับทุก action ที่เขียนเอง):
   1. `auth()` — ยังไม่ login → return error
   2. โหลดข้อมูลจาก DB — ไม่เจอ → return error
@@ -2540,10 +2830,30 @@ export async function approveDocument(id: string): Promise<{ error?: string }> {
 
 **`deleteDocumentAttachment` — ลำดับกลับกัน**: ลบแถว DB ก่อน แล้วค่อยลบไฟล์บน disk — เหตุผล: ถ้าลบไฟล์บน disk ไม่สำเร็จ จะเหลือแค่ "ไฟล์กำพร้า" บน disk ที่ไม่มีใครอ้างถึง (ไม่อันตราย) ดีกว่ากรณีกลับกันที่ DB ยังชี้ไปยังไฟล์ที่หายไปแล้ว (ผู้ใช้กดดาวน์โหลดแล้ว error) — `detail: file.fileName` บันทึกว่าลบไฟล์ไหน
 
+**`updateDocument(id, formData)` — แก้ไขข้อมูลเอกสาร** (เรียกจากฟอร์มหน้า `/documents/[id]/edit` ใน 9.10.1):
+- **signature ต่างจาก action อื่น**: รับ `id` เป็นพารามิเตอร์แรก ตามด้วย `formData` — หน้าแก้ไขจะ "ผูก" id ไว้ล่วงหน้าด้วย `updateDocument.bind(null, id)` ได้ฟังก์ชันที่รับแค่ `formData` ส่งให้ `<form action>` ได้เลย (ไม่ต้องมี hidden input `id` ที่ผู้ใช้แก้ค่าได้)
+- **ใช้ `redirect(...?error=)` แทน return `{ error }`** — เพราะถูกเรียกจาก `<form action>` ไม่ใช่จาก `DeleteButton` (เหมือน pattern ของ action ฝั่ง admin ใน Step 10) และใช้ `notFound()` เมื่อไม่พบเอกสาร
+- ตรวจสิทธิ์ด้วย **`canEditDocument()`** ซ้ำฝั่ง server เสมอ แม้หน้าแก้ไขจะตรวจไปแล้ว
+- แก้ได้แค่ `title`/`description`/`documentDate` — **ไม่รับ `documentTypeId`/`departmentId` จากฟอร์มเลย** เพราะเลขที่เอกสารถูกสร้างจากสองค่านี้แล้ว (ถ้าเปลี่ยนทีหลัง เลข `MEMO-2026-0007` อาจกลายเป็นเอกสารประเภทสัญญาของอีกหน่วยงาน)
+- `formData.get(...)?.toString().trim()` — ป้องกันกรณีไม่มี field (ได้ `undefined` แทนที่จะ crash) แล้ว validate ว่าไม่ว่าง
+- update + audit **"UPDATE"** ในทรานแซกชันเดียว — สังเกตว่า `documentTitle` ใน log ใช้ **ชื่อใหม่** (`title`) ไม่ใช่ `document.title` เดิม
+
+**`uploadDocumentFiles(id, formData)` — เพิ่มไฟล์แนบให้เอกสารเดิม**:
+- สิทธิ์เดียวกับการแก้ไข (`canEditDocument()`) — เอกสารที่อนุมัติแล้ว STAFF เพิ่มไฟล์ไม่ได้
+- `.filter((f): f is File => f instanceof File && f.size > 0)` — **type guard**: กรองเฉพาะไฟล์จริงที่มีขนาด และบอก TypeScript ว่าผลลัพธ์เป็น `File[]` (ปลอดภัยกว่า `as File[]` ใน 9.9 เพราะตรวจจริงไม่ใช่แค่บอก type)
+- ตรวจขนาด **ทุกไฟล์ก่อน** ค่อยบันทึกไฟล์แรก — ไม่งั้นอาจบันทึกไปแล้วบางไฟล์แล้วค่อยเจอไฟล์ที่เกิน
+- แต่ละไฟล์: เขียนลง disk แล้วสร้าง `DocumentFile` + audit "UPDATE" (`detail` = ชื่อไฟล์) ในทรานแซกชันเดียวกัน
+- การลบไฟล์แนบในหน้าแก้ไขใช้ `deleteDocumentAttachment` ตัวเดิม (ซึ่งตรวจด้วย `canDeleteDocument()` — กฎเดียวกันในตอนนี้)
+
 **`approveDocument`**:
 - ตรวจ `approvedAt` ซ้ำ — กันการอนุมัติซ้ำ (เช่นเปิดสองแท็บ)
 - update + audit "APPROVE" ในทรานแซกชันเดียว
-- ไม่มี action "ยกเลิกอนุมัติ" — เป็น one-way gate โดยตั้งใจ
+
+**`unapproveDocument`** (เพิ่มทีหลัง เมื่อพบว่าต้องเปิดให้แก้ไขเอกสารที่อนุมัติแล้วได้ในบางกรณี):
+- สิทธิ์เดียวกับ `approveDocument` (`canApproveDocument()`) — คนที่อนุมัติได้คือคนที่ยกเลิกอนุมัติได้
+- ตรวจ `!approvedAt` — กันการยกเลิกซ้ำเอกสารที่ยังไม่อนุมัติ
+- update (`approvedAt`/`approvedById` กลับเป็น `null`) + audit "UNAPPROVE" ในทรานแซกชันเดียว
+- ผลคือเอกสารกลับสู่สถานะรออนุมัติ → `canEditDocument()`/`canDeleteDocument()` กลับไปใช้กฎ `canManageDocument()` ปกติ ทำให้ STAFF แก้ไข/ลบได้อีกครั้ง
 
 **Array form ของ `$transaction([...])`** vs **callback form `$transaction(async (tx) => ...)`**: array form ใช้เมื่อคำสั่งทั้งหมดรู้ล่วงหน้าและไม่ขึ้นกับผลของกันและกัน, callback form (ใช้ใน 9.9) ใช้เมื่อคำสั่งหลังต้องใช้ผลจากคำสั่งก่อน
 
@@ -3087,14 +3397,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { canDeleteDocument, canApproveDocument, canViewDocument } from "@/lib/access";
+import { canDeleteDocument, canApproveDocument, canEditDocument, canViewDocument } from "@/lib/access";
 import { AppShell } from "@/components/AppShell";
 import { FilePreview } from "@/components/FilePreview";
 import { FormattedDate } from "@/components/FormattedDate";
 import { DeleteButton } from "@/components/DeleteButton";
 import { DeleteDocumentButton } from "@/components/DeleteDocumentButton";
 import { ApproveButton } from "@/components/ApproveButton";
-import { deleteDocument, deleteDocumentAttachment, approveDocument } from "../actions";
+import { UnapproveButton } from "@/components/UnapproveButton";
+import { deleteDocument, deleteDocumentAttachment, approveDocument, unapproveDocument } from "../actions";
 
 export default async function DocumentDetailPage({
   params,
@@ -3122,6 +3433,8 @@ export default async function DocumentDetailPage({
   const isApproved = doc.approvedAt !== null;
   const canDelete = canDeleteDocument(user, doc.departmentId, isApproved);
   const canApprove = !isApproved && canApproveDocument(user, doc.departmentId);
+  const canUnapprove = isApproved && canApproveDocument(user, doc.departmentId);
+  const canEdit = canEditDocument(user, doc.departmentId, isApproved);
 
   return (
     <AppShell
@@ -3142,11 +3455,26 @@ export default async function DocumentDetailPage({
               <p className="mt-1 font-mono text-sm text-gray-500">{doc.documentNumber}</p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {canEdit && (
+                <Link
+                  href={`/documents/${doc.id}/edit`}
+                  className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
+                >
+                  แก้ไข
+                </Link>
+              )}
               {canApprove && (
                 <ApproveButton
                   id={doc.id}
                   itemLabel={`เอกสาร ${doc.documentNumber}`}
                   action={approveDocument}
+                />
+              )}
+              {canUnapprove && (
+                <UnapproveButton
+                  id={doc.id}
+                  itemLabel={`เอกสาร ${doc.documentNumber}`}
+                  action={unapproveDocument}
                 />
               )}
               {canDelete && (
@@ -3244,12 +3572,200 @@ export default async function DocumentDetailPage({
 อธิบาย:
 - **`params: Promise<{ id: string }>`** — ค่า `[id]` จาก URL (เช่น `/documents/cm1abc` → `id = "cm1abc"`) ต้อง `await`
 - **ไม่พบ หรือ ไม่มีสิทธิ์ดู → `notFound()` ทั้งคู่** — ไม่บอกว่า "มีเอกสารนี้แต่คุณดูไม่ได้" (ป้องกันการเดา id)
-- **คำนวณ flag สิทธิ์ 3 ตัว** แล้วใช้ใน JSX:
-  - `canApprove` = ยังไม่อนุมัติ **และ** มีสิทธิ์อนุมัติ
+- **คำนวณ flag สิทธิ์ 4 ตัว** แล้วใช้ใน JSX:
+  - `canEdit` = `canEditDocument(...)` → แสดงลิงก์ "แก้ไข" ไป `/documents/[id]/edit`
+  - `canApprove` = ยังไม่อนุมัติ **และ** มีสิทธิ์อนุมัติ → ปุ่ม "อนุมัติเอกสาร"
+  - `canUnapprove` = อนุมัติแล้ว **และ** มีสิทธิ์อนุมัติ → ปุ่ม "ยกเลิกการอนุมัติ" — ใช้ `canApproveDocument` **ไม่ใช่** `canEditDocument` เพราะ "ใครยกเลิกอนุมัติได้" ควรเป็นกลุ่มเดียวกับ "ใครอนุมัติได้" (`canApprove` กับ `canUnapprove` จึงไม่มีทางเป็นจริงพร้อมกัน — จะเห็นปุ่มใดปุ่มหนึ่งเท่านั้น)
   - `canDelete` = ใช้กับทั้งปุ่มลบเอกสาร **และ** ปุ่มลบไฟล์แนบทุกไฟล์ (กฎเดียวกัน — ถ้าลืมเปลี่ยนจุดใดจุดหนึ่งตอนเพิ่มระบบอนุมัติ จะกลายเป็นช่องโหว่ที่ลบไฟล์ของเอกสารที่อนุมัติแล้วได้)
 - **ปุ่มลบเอกสารใช้ `DeleteDocumentButton`** (ลบแล้วพากลับ `/documents`) ส่วน **ปุ่มลบไฟล์ใช้ `DeleteButton`** (ลบแล้ว refresh หน้าเดิม)
 - **`<dl>/<dt>/<dd>`** — HTML สำหรับรายการ "หัวข้อ: ค่า" จัดเป็น grid 2 คอลัมน์
 - `whitespace-pre-wrap` — รักษาการขึ้นบรรทัดใหม่ของรายละเอียดที่ผู้ใช้พิมพ์
+
+### 9.10.1 ไฟล์ `src/app/documents/[id]/edit/page.tsx` — แก้ไขเอกสาร + จัดการไฟล์แนบ
+
+สร้างโฟลเดอร์ `src/app/documents/[id]/edit/` แล้วสร้างไฟล์:
+
+```tsx
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { canEditDocument, canViewDocument } from "@/lib/access";
+import { AppShell } from "@/components/AppShell";
+import { FilePreview } from "@/components/FilePreview";
+import { DeleteButton } from "@/components/DeleteButton";
+import { MAX_UPLOAD_SIZE_MB } from "@/lib/storage";
+import { updateDocument, uploadDocumentFiles, deleteDocumentAttachment } from "../../actions";
+
+export default async function EditDocumentPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { id } = await params;
+  const { error } = await searchParams;
+  const session = await auth();
+  const user = session!.user;
+
+  const doc = await prisma.document.findUnique({
+    where: { id },
+    include: { documentType: true, department: true, files: true },
+  });
+
+  if (!doc) notFound();
+  if (!(await canViewDocument(user, doc.departmentId, doc.documentTypeId))) notFound();
+
+  const isApproved = doc.approvedAt !== null;
+  if (!canEditDocument(user, doc.departmentId, isApproved)) notFound();
+
+  const updateDocumentWithId = updateDocument.bind(null, id);
+  const uploadDocumentFilesWithId = uploadDocumentFiles.bind(null, id);
+
+  return (
+    <AppShell
+      userLabel={session!.user.name ?? session!.user.email ?? undefined}
+      userId={user.id}
+      isAdmin={user.role === "ADMIN"}
+      role={user.role}
+    >
+      <div className="mx-auto max-w-2xl">
+        <Link href={`/documents/${id}`} className="text-sm text-blue-600 hover:underline">
+          &larr; กลับไปหน้ารายละเอียดเอกสาร
+        </Link>
+
+        <div className="mt-3 rounded-lg bg-white p-8 shadow-sm">
+          <h1 className="text-xl font-semibold text-gray-900">แก้ไขเอกสาร</h1>
+          <p className="mt-1 font-mono text-sm text-gray-500">{doc.documentNumber}</p>
+
+          {error && (
+            <p className="mt-4 rounded bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p>
+          )}
+
+          <form action={updateDocumentWithId} className="mt-6 space-y-5">
+            <div className="space-y-1.5">
+              <label className="text-sm font-semibold text-gray-900">ชื่อเรื่อง</label>
+              <input
+                name="title"
+                required
+                defaultValue={doc.title}
+                className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-sm font-semibold text-gray-900">รายละเอียด</label>
+              <textarea
+                name="description"
+                rows={3}
+                defaultValue={doc.description ?? ""}
+                className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-sm font-semibold text-gray-900">ประเภทเอกสาร</label>
+                <p className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-600">
+                  {doc.documentType.name}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-semibold text-gray-900">หน่วยงาน</label>
+                <p className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-600">
+                  {doc.department.name}
+                </p>
+              </div>
+            </div>
+            <p className="-mt-3 text-xs text-gray-500">
+              ไม่สามารถเปลี่ยนประเภทเอกสารหรือหน่วยงานได้ เนื่องจากเลขที่เอกสารถูกสร้างขึ้นตามค่านี้แล้ว
+            </p>
+
+            <div className="space-y-1.5">
+              <label className="text-sm font-semibold text-gray-900">วันที่เอกสาร</label>
+              <input
+                type="date"
+                name="documentDate"
+                required
+                defaultValue={doc.documentDate.toISOString().slice(0, 10)}
+                className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full rounded-md bg-blue-600 py-3 text-sm font-semibold text-white hover:bg-blue-700"
+            >
+              บันทึกการแก้ไข
+            </button>
+          </form>
+
+          <hr className="my-8 border-gray-200" />
+
+          <h2 className="text-sm font-semibold text-gray-900">ไฟล์แนบ</h2>
+          <ul className="mt-2 divide-y divide-gray-200 rounded-md border border-gray-200 text-sm">
+            {doc.files.map((f) => (
+              <li key={f.id} className="flex items-center justify-between px-4 py-2.5">
+                <span>{f.fileName}</span>
+                <div className="flex items-center gap-4">
+                  <FilePreview
+                    fileName={f.fileName}
+                    mimeType={f.mimeType}
+                    previewUrl={`/api/documents/${doc.id}/files/${f.id}?inline=1`}
+                  />
+                  <a
+                    href={`/api/documents/${doc.id}/files/${f.id}`}
+                    className="text-blue-600 hover:underline"
+                  >
+                    ดาวน์โหลด
+                  </a>
+                  <DeleteButton
+                    id={f.id}
+                    itemLabel={`ไฟล์ ${f.fileName}`}
+                    action={deleteDocumentAttachment}
+                  />
+                </div>
+              </li>
+            ))}
+            {doc.files.length === 0 && (
+              <li className="px-4 py-3 text-gray-400">ไม่มีไฟล์แนบ</li>
+            )}
+          </ul>
+
+          <form action={uploadDocumentFilesWithId} className="mt-4 space-y-1.5">
+            <label className="text-sm font-semibold text-gray-900">เพิ่มไฟล์แนบ</label>
+            <input
+              type="file"
+              name="files"
+              multiple
+              className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+            <p className="text-xs text-gray-500">
+              แนบได้หลายไฟล์พร้อมกัน — ขนาดไฟล์สูงสุด {MAX_UPLOAD_SIZE_MB} MB ต่อไฟล์
+            </p>
+            <button
+              type="submit"
+              className="mt-2 rounded-md bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200"
+            >
+              อัปโหลดไฟล์
+            </button>
+          </form>
+        </div>
+      </div>
+    </AppShell>
+  );
+}
+```
+
+อธิบาย:
+- **ตรวจสิทธิ์ 2 ชั้นก่อน render**: ดูได้ไหม (`canViewDocument`) → แก้ได้ไหม (`canEditDocument`) — ไม่ผ่านชั้นใดก็ `notFound()` ทั้งคู่ ดังนั้น STAFF ที่พิมพ์ URL `/documents/<id>/edit` ของเอกสารที่อนุมัติแล้วตรงๆ จะได้ 404
+- **`updateDocument.bind(null, id)`** — เทคนิคมาตรฐานของ Next.js สำหรับส่งค่าเพิ่มเติมให้ Server Action: `bind` สร้างฟังก์ชันใหม่ที่ "จำ" `id` ไว้เป็นอาร์กิวเมนต์ตัวแรก (`null` คือค่า `this` ซึ่งไม่ได้ใช้) ผลลัพธ์รับแค่ `formData` จึงใส่ใน `<form action>` ได้ — ดีกว่า `<input type="hidden" name="id">` เพราะค่า id ถูก encode ไว้ฝั่ง server ผู้ใช้แก้จาก HTML ไม่ได้ (แต่ action ก็ยังตรวจสิทธิ์ซ้ำอยู่ดี)
+- **2 ฟอร์มแยกกันในหน้าเดียว** — ฟอร์มแก้ข้อมูล (`updateDocumentWithId`) และฟอร์มอัปโหลดไฟล์ (`uploadDocumentFilesWithId`) กดบันทึกข้อมูลไม่ต้องอัปโหลดไฟล์ใหม่ทุกครั้ง และกลับกัน
+- **ประเภทเอกสาร/หน่วยงานแสดงเป็น `<p>` read-only** ไม่ใช่ `<select>` พร้อมข้อความอธิบายเหตุผล — ผู้ใช้เห็นค่าแต่แก้ไม่ได้ (และ action ก็ไม่รับสองค่านี้อยู่แล้ว)
+- **`doc.documentDate.toISOString().slice(0, 10)`** — แปลงวันที่ใน DB (UTC midnight) กลับเป็น `YYYY-MM-DD` ให้ `<input type="date">` — ใช้ `toISOString` (UTC) สอดคล้องกับ `FormattedDate` ที่ใช้ UTC getters
+- **`defaultValue={doc.description ?? ""}`** — `textarea` รับ `null` ไม่ได้ ต้องแปลงเป็นสตริงว่าง
+- **รายการไฟล์แนบ** — เหมือนหน้า detail แต่แสดงปุ่มลบทุกไฟล์โดยไม่เช็ค `canDelete` เพราะมาถึงหน้านี้ได้แปลว่าผ่าน `canEditDocument` แล้ว (ซึ่งกฎตรงกับ `canDeleteDocument` ในตอนนี้) — และ `deleteDocumentAttachment` ตรวจ `canDeleteDocument` ซ้ำฝั่ง server อยู่แล้ว ถ้าวันหน้ากฎสองตัวแยกกัน ให้เพิ่มการเช็ค `canDeleteDocument` ในหน้านี้ด้วย
 
 ### 9.11 ไฟล์ `src/app/api/documents/[id]/files/[fileId]/route.ts` — ดาวน์โหลด/พรีวิวไฟล์
 
@@ -3336,8 +3852,11 @@ login เป็น admin แล้วทดสอบ:
 4. หน้า detail: กด "ดูตัวอย่าง" → เห็น PDF/รูปใน modal, กด "ดาวน์โหลด" → ได้ไฟล์ชื่อเดิม
 5. ลบไฟล์แนบ 1 ไฟล์ → หายจากรายการทันที (ไม่ต้อง reload) และหายจากโฟลเดอร์ `storage/documents/<id>/`
 6. กลับหน้า list ทดสอบค้นหาด้วยเลขที่เอกสาร และช่วงวันที่
-7. กด "อนุมัติเอกสาร" → สถานะเปลี่ยนเป็น "อนุมัติแล้ว โดย System Admin"
-8. เปิด Prisma Studio ดูตาราง `DocumentAudit` → มีแถว CREATE, DOWNLOAD, DELETE, APPROVE
+7. หน้า detail กด "แก้ไข" → เปลี่ยนชื่อเรื่อง/วันที่ → บันทึก → กลับมาหน้า detail เห็นค่าใหม่ (ประเภท/หน่วยงานแก้ไม่ได้ แสดงเป็นกล่องเทา)
+8. ในหน้าแก้ไข อัปโหลดไฟล์เพิ่ม 1 ไฟล์ → กลับหน้า detail เห็นไฟล์ใหม่ในรายการ
+9. กด "อนุมัติเอกสาร" → สถานะเปลี่ยนเป็น "อนุมัติแล้ว โดย System Admin" และปุ่ม "อนุมัติ" กลายเป็น "ยกเลิกการอนุมัติ"
+10. กด "ยกเลิกการอนุมัติ" → สถานะกลับเป็น "รออนุมัติ"
+11. เปิด Prisma Studio ดูตาราง `DocumentAudit` → มีแถว CREATE, UPDATE, DOWNLOAD, DELETE, APPROVE, UNAPPROVE
 
 ---
 
@@ -4697,6 +5216,7 @@ const ACTION_LABELS: Record<string, string> = {
   UPDATE: "แก้ไข",
   ARCHIVE: "จัดเก็บถาวร",
   APPROVE: "อนุมัติ",
+  UNAPPROVE: "ยกเลิกอนุมัติ",
 };
 
 const ACTION_BADGE_CLASSES: Record<string, string> = {
@@ -4704,6 +5224,7 @@ const ACTION_BADGE_CLASSES: Record<string, string> = {
   DOWNLOAD: "bg-blue-100 text-blue-700",
   DELETE: "bg-red-100 text-red-700",
   APPROVE: "bg-emerald-100 text-emerald-700",
+  UNAPPROVE: "bg-orange-100 text-orange-700",
   UPDATE: "bg-amber-100 text-amber-700",
   ARCHIVE: "bg-gray-100 text-gray-600",
 };
@@ -4893,6 +5414,7 @@ export default async function AuditLogPage({
 
 อธิบาย:
 - **`ACTION_LABELS` / `ACTION_BADGE_CLASSES`** — แปลรหัส action เป็นภาษาไทยและสี badge; `?? log.action` / `?? "bg-gray-100..."` เป็น fallback ถ้าวันหนึ่งมี action ใหม่ที่ยังไม่ได้เพิ่มในตาราง
+  - **ทุกครั้งที่เพิ่ม action ใหม่ต้องมาเพิ่มที่นี่ด้วย** — เช่น `"UNAPPROVE"` (จาก `unapproveDocument` ใน 9.7) ถ้าลืมเพิ่ม ตารางจะแสดงเป็นข้อความอังกฤษ badge สีเทา และ **เลือกกรองใน dropdown "การกระทำ" ไม่ได้** เพราะ dropdown สร้างจาก `ACTION_LABELS`
 - **ตัวกรอง 3 แบบ** (คำค้นหา, การกระทำ, ผู้ใช้) รวมเป็น `where` ด้วย spread แบบมีเงื่อนไข
 - **ค้นหาจาก snapshot** (`documentNumber`/`documentTitle` ในตาราง audit เอง) ไม่ join กับ `Document` → ค้นเจอแม้เอกสารถูกลบไปแล้ว
 - **ลิงก์ไปเอกสารเฉพาะตอน `documentId` ยังไม่เป็น `null`** — ถ้าเอกสารถูกลบ แสดงเป็นข้อความธรรมดาพร้อม tooltip "เอกสารนี้ถูกลบไปแล้ว" (ถ้าทำเป็นลิงก์จะพาไปหน้า 404)
@@ -4918,7 +5440,7 @@ login เป็น admin แล้วทดสอบ:
 
 ## Step 11: ฟีเจอร์เสริม — โปรไฟล์ผู้ใช้ + ทบทวนฟีเจอร์ทั้งหมด
 
-ใน stepbystep.md Step 11 คือรายการฟีเจอร์เสริม 9 ข้อที่ค่อยๆ เพิ่มทีหลัง — ใน workshop นี้ **8 ข้อถูกสร้างไปแล้วในโค้ดของ Step 3–10** (เพราะใช้ schema และโค้ดฉบับสมบูรณ์ตั้งแต่ต้น) เหลือข้อเดียวที่ต้องสร้างไฟล์ใหม่คือ **หน้าโปรไฟล์ผู้ใช้**
+ใน stepbystep.md Step 11 คือรายการฟีเจอร์เสริม 10 ข้อที่ค่อยๆ เพิ่มทีหลัง — ใน workshop นี้ **9 ข้อถูกสร้างไปแล้วในโค้ดของ Step 3–10** (เพราะใช้ schema และโค้ดฉบับสมบูรณ์ตั้งแต่ต้น) เหลือข้อเดียวที่ต้องสร้างไฟล์ใหม่คือ **หน้าโปรไฟล์ผู้ใช้**
 
 ### 11.1 ไฟล์ `src/app/profile/actions.ts`
 
@@ -5224,7 +5746,7 @@ export async function GET(
 - **`Cache-Control: private, max-age=3600`** — ให้เบราว์เซอร์ cache รูปไว้ 1 ชั่วโมง (topbar โหลดรูปทุกหน้า ไม่ต้องดึงซ้ำ) — `private` = ห้าม proxy/CDN กลางทาง cache เพราะต้อง login
   - ผลข้างเคียง: เปลี่ยนรูปแล้ว topbar อาจยังเห็นรูปเก่าจนกว่า cache หมดอายุ (หน้าโปรไฟล์ใช้ URL เดียวกัน) — ถ้าต้องการให้เห็นทันที ให้ต่อ `?v=<avatarPath>` ท้าย URL รูป
 
-### 11.4 ทบทวน: ฟีเจอร์เสริมทั้ง 9 ข้อของ stepbystep.md อยู่ตรงไหนในโค้ด
+### 11.4 ทบทวน: ฟีเจอร์เสริมทั้ง 10 ข้อของ stepbystep.md อยู่ตรงไหนในโค้ด
 
 | # | ฟีเจอร์ (stepbystep.md Step 11) | อยู่ในไฟล์ (workshop step) | จุดสำคัญที่ต้องจำ |
 |---|---|---|---|
@@ -5237,6 +5759,7 @@ export async function GET(
 | 7 | Audit log ที่รอดแม้เอกสารถูกลบ | `DocumentAudit` (3.1–3.2), ทุกจุดที่ `documentAudit.create`, `admin/audit-log` (10.13) | `SetNull` + snapshot `documentNumber`/`documentTitle` |
 | 8 | Format วันที่ `dd/mm/yyyy` ตายตัว | `FormattedDate.tsx` (9.1) | ใช้ `getUTC*`, ไม่ใช้ `toLocaleDateString("th-TH")` (ได้ พ.ศ.) — ส่วน `<input type="date">` บังคับ format การพิมพ์จากโค้ดไม่ได้ ขึ้นกับ OS/browser |
 | 9 | ระบบอนุมัติ + role `MANAGER` | `Document.approvedAt/approvedById` (3.1), `access.ts`, `ApproveButton.tsx`, `documents/actions.ts`, หน้า list/detail | อนุมัติแล้วลบได้เฉพาะ ADMIN/MANAGER หน่วยงานเดียวกัน — ต้องใช้ `canDeleteDocument` **ทุกจุด** ที่มีปุ่มลบ (ทั้งเอกสารและไฟล์แนบ) |
+| 10 | แก้ไขเอกสาร + ยกเลิกการอนุมัติ | `canEditDocument` ใน `access.ts` (8.1), `UnapproveButton.tsx` (9.5.1), `updateDocument`/`uploadDocumentFiles`/`unapproveDocument` ใน `documents/actions.ts` (9.7), หน้า detail (9.10), หน้าแก้ไข `documents/[id]/edit` (9.10.1) | แยก `canEditDocument` จาก `canDeleteDocument` แม้กฎตรงกัน, ห้ามแก้ประเภท/หน่วยงาน (เลขที่เอกสารผูกอยู่), คนยกเลิกอนุมัติได้ = คนอนุมัติได้ (`canApproveDocument`) |
 
 #### ถ้าทำตาม stepbystep.md แบบค่อยๆ เพิ่ม schema (ไม่ได้ใช้ schema สมบูรณ์ตั้งแต่ต้น)
 
@@ -5381,6 +5904,11 @@ npm run build
 | เห็นปุ่ม "+ สร้างเอกสาร" | ✅ | ✅ | ✅ | ❌ | ✅ |
 | dropdown ประเภทมี "ใบกำกับภาษี" | ❌ (เจ้าของคือบัญชี) | ❌ | ✅ | - | ✅ |
 | ปุ่ม "อนุมัติ" บน HR-DOC | ❌ | ✅ | - | ❌ | ✅ |
+| ปุ่ม "แก้ไข" บน HR-DOC **ก่อนอนุมัติ** | ✅ | ✅ | - | ❌ | ✅ |
+| ปุ่ม "แก้ไข" บน HR-DOC **หลังอนุมัติ** | ❌ | ✅ | - | ❌ | ✅ |
+| เปิด `/documents/<HR-DOC>/edit` ตรงๆ หลังอนุมัติ | 404 | ✅ | 404 | 404 | ✅ |
+| ปุ่ม "ยกเลิกการอนุมัติ" บน HR-DOC ที่อนุมัติแล้ว | ❌ | ✅ | - | ❌ | ✅ |
+| หลัง manager.hr ยกเลิกอนุมัติ → staff.hr แก้ไข/ลบได้อีก | ✅ | - | - | - | - |
 | ลบ HR-DOC **หลังอนุมัติแล้ว** | ❌ (ปุ่มลบหายไป) | ✅ | - | ❌ | ✅ |
 | เข้า `/admin/users` | 404 | 404 | 404 | 404 | ✅ |
 | `/documents/new` | ✅ | ✅ | ✅ | 404 | ✅ |
@@ -5428,7 +5956,7 @@ npm run start
 | 6 | เลขที่เอกสาร + config | `src/lib/config.ts`, `src/lib/document-number.ts` |
 | 7 | Storage | `src/lib/storage.ts` |
 | 8 | Access control | `src/lib/access.ts`, `src/lib/require-admin.ts` |
-| 9 | CRUD เอกสาร | `FormattedDate`, `Pagination`, `DeleteButton`, `DeleteDocumentButton`, `ApproveButton`, `FilePreview`, `documents/actions.ts`, `documents/page.tsx`, `documents/new/page.tsx`, `documents/[id]/page.tsx`, `api/documents/[id]/files/[fileId]/route.ts` |
+| 9 | CRUD เอกสาร | `FormattedDate`, `Pagination`, `DeleteButton`, `DeleteDocumentButton`, `ApproveButton`, `UnapproveButton`, `FilePreview`, `documents/actions.ts`, `documents/page.tsx`, `documents/new/page.tsx`, `documents/[id]/page.tsx`, `documents/[id]/edit/page.tsx`, `api/documents/[id]/files/[fileId]/route.ts` |
 | 10 | Admin | `admin/departments/*` (4), `admin/document-types/*` (4), `admin/users/*` (4), `admin/audit-log/page.tsx` |
 | 11 | โปรไฟล์ + ทบทวนฟีเจอร์ | `profile/actions.ts`, `profile/page.tsx`, `api/users/[id]/avatar/route.ts` |
 | 12 | ตรวจสอบ | - |
@@ -5479,7 +6007,8 @@ twp_document_system/
     │   ├── FormattedDate.tsx              # dd/mm/yyyy
     │   ├── Pagination.tsx                 # (server)
     │   ├── PasswordInput.tsx              # (client)
-    │   └── SidebarNav.tsx                 # (client)
+    │   ├── SidebarNav.tsx                 # (client)
+    │   └── UnapproveButton.tsx            # (client) ยกเลิกการอนุมัติ
     └── app/
         ├── globals.css
         ├── layout.tsx
@@ -5489,10 +6018,12 @@ twp_document_system/
         │   ├── actions.ts
         │   └── page.tsx
         ├── documents/
-        │   ├── actions.ts                 # delete / deleteAttachment / approve
+        │   ├── actions.ts                 # delete / deleteAttachment / update / uploadFiles / approve / unapprove
         │   ├── page.tsx                   # list + ค้นหา
         │   ├── new/page.tsx               # สร้าง
-        │   └── [id]/page.tsx              # detail
+        │   └── [id]/
+        │       ├── page.tsx               # detail
+        │       └── edit/page.tsx          # แก้ไข + จัดการไฟล์แนบ
         ├── admin/
         │   ├── audit-log/page.tsx
         │   ├── departments/{page,new/page,[id]/edit/page,actions}

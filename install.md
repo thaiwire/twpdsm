@@ -322,6 +322,7 @@ npx prisma generate
 npm run db:migrate:deploy   # รันเฉพาะถ้ามี migration ใหม่
 npm run build
 pm2 restart twp-document-system
+npm run build && pm2 restart twp-document-system --update-env
 ```
 
 **เหตุผลที่ต้องรัน `prisma generate` ทุกครั้งหลัง `git pull`**: ถ้า schema เปลี่ยน แล้วลืมรัน จะได้ Prisma Client รุ่นเก่าที่ไม่มี field/model ใหม่ ทำให้เกิด error `Cannot read properties of undefined` แม้โค้ดแอปจะถูกต้องแล้วก็ตาม (เจอปัญหานี้บ่อยระหว่างพัฒนา — อาการเดียวกับตอน dev server ไม่ได้ restart หลัง migrate)

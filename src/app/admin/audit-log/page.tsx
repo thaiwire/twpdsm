@@ -13,6 +13,7 @@ const ACTION_LABELS: Record<string, string> = {
   UPDATE: "แก้ไข",
   ARCHIVE: "จัดเก็บถาวร",
   APPROVE: "อนุมัติ",
+  UNAPPROVE: "ยกเลิกอนุมัติ",
 };
 
 const ACTION_BADGE_CLASSES: Record<string, string> = {
@@ -20,6 +21,7 @@ const ACTION_BADGE_CLASSES: Record<string, string> = {
   DOWNLOAD: "bg-blue-100 text-blue-700",
   DELETE: "bg-red-100 text-red-700",
   APPROVE: "bg-emerald-100 text-emerald-700",
+  UNAPPROVE: "bg-orange-100 text-orange-700",
   UPDATE: "bg-amber-100 text-amber-700",
   ARCHIVE: "bg-gray-100 text-gray-600",
 };
