@@ -97,6 +97,24 @@ export function canDeleteDocument(
   return canApproveDocument(user, documentDepartmentId);
 }
 
+/**
+ * Can edit a document's fields, or add/remove attachments on it. Same gate as
+ * canDeleteDocument — once approved, only ADMIN or a MANAGER in the same
+ * department may still change it (a plain STAFF member can no longer edit an
+ * approved document, even the one they created). Kept as a distinct function
+ * from canDeleteDocument (even though the rule is currently identical) since
+ * "who can edit" and "who can delete" are separate questions that could
+ * diverge later — don't collapse them into one just because they match today.
+ */
+export function canEditDocument(
+  user: SessionUser,
+  documentDepartmentId: string,
+  isApproved: boolean
+) {
+  if (!isApproved) return canManageDocument(user, documentDepartmentId);
+  return canApproveDocument(user, documentDepartmentId);
+}
+
 export function isAdmin(user: SessionUser) {
   return user.role === "ADMIN";
 }

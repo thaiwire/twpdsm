@@ -2,6 +2,8 @@
 
 เอกสารนี้อธิบายลำดับขั้นตอนการสร้างโปรเจกต์นี้ตั้งแต่ศูนย์ ให้อ่านตามลำดับ — แต่ละ step ต่อยอดจาก step ก่อนหน้า ถ้าต้องเริ่มโปรเจกต์ใหม่คล้ายกันนี้ ทำตามลำดับนี้ได้เลย
 
+เอกสารนี้เน้น **วิธีสร้าง** (how-to build ทีละ step พร้อมเหตุผลของแต่ละการตัดสินใจ) ถ้าต้องการดู **ภาพรวมฟีเจอร์ที่สร้างเสร็จแล้วพร้อม flow การทำงาน** ให้ดู [feature.md](feature.md) แทน — อ่านคู่กันจะเห็นทั้งสองมุม: "ทำไมถึงออกแบบแบบนี้" (เอกสารนี้) และ "ระบบทำงานยังไงตอนใช้งานจริง" ([feature.md](feature.md))
+
 **Tech stack**: Next.js 16 (App Router) + TypeScript + Prisma 7 + Microsoft SQL Server + NextAuth v5 + Tailwind CSS v4
 
 ---
@@ -10,8 +12,8 @@
 
 ก่อนเริ่ม ให้ตัดสินใจเรื่องต่อไปนี้ (จะเปลี่ยนทีหลังได้ แต่ตัดสินใจล่วงหน้าจะทำงานลื่นกว่า):
 
-1. **Entity หลัก** — ระบบนี้มี 6 ตาราง: `User`, `Department` (หน่วยงาน), `DocumentType` (ประเภทเอกสาร), `Document` (เอกสาร), `DocumentFile` (ไฟล์แนบ), `DocumentAudit` (audit log)
-2. **Role ที่ต้องการ** — เริ่มจาก `ADMIN`/`STAFF` ก่อนพอ แล้วค่อยเพิ่ม role พิเศษทีหลังถ้าจำเป็น (ดู Step 10)
+1. **Entity หลัก** — เริ่มจาก 6 ตารางพื้นฐานก่อน: `User`, `Department` (หน่วยงาน), `DocumentType` (ประเภทเอกสาร), `Document` (เอกสาร), `DocumentFile` (ไฟล์แนบ), `DocumentAudit` (audit log) — ตารางที่ 7 (`DocumentTypeAccess`) ค่อยเพิ่มทีหลังตอนทำฟีเจอร์สิทธิ์ข้ามหน่วยงาน (ดู Step 11 ข้อ 4)
+2. **Role ที่ต้องการ** — เริ่มจาก `ADMIN`/`STAFF` ก่อนพอ แล้วค่อยเพิ่ม role พิเศษทีหลังถ้าจำเป็น (`VIEWER` ดู Step 11 ข้อ 3, `MANAGER` ดู Step 11 ข้อ 8)
 3. **ที่เก็บไฟล์** — local disk (`storage/` ในโปรเจกต์) พอสำหรับ dev/on-prem; ถ้า deploy บน cloud ค่อยเปลี่ยนเป็น object storage ทีหลัง
 4. **Database** — ต้องมี SQL Server instance พร้อมใช้งาน (local, Docker, หรือ remote) ก่อนเริ่ม Step 2
 
@@ -163,7 +165,7 @@ model DocumentAudit {
 - **`documentNumber` เป็น primary search key** — ทำ `@unique` และสร้าง index เผื่อค้นหาเพิ่มเติม
 - **`numberFormat` เป็น template string** ที่ generate เลขที่เอกสารอัตโนมัติ (ดู Step 6)
 - **`DocumentFile` แยกจาก `Document`** — เก็บแค่ metadata ในฐานข้อมูล ตัวไฟล์จริงอยู่บน disk (ดู Step 7)
-- **`DocumentAudit` เป็น append-only log** — ไม่มีการ update/delete แถวนี้เลย ใช้ตรวจสอบย้อนหลัง
+- **`DocumentAudit` เป็น append-only log** — ไม่มีการ update/delete แถวนี้เลย ใช้ตรวจสอบย้อนหลัง — **แต่ schema ข้างบนนี้มีข้อบกพร่องซ่อนอยู่**: `onDelete: Cascade` บน `documentId` แปลว่าถ้าลบเอกสาร log ทั้งหมดของเอกสารนั้น (รวมถึง log ที่บันทึกว่า "ใครเป็นคนลบ") จะหายไปด้วย ทำให้ตรวจสอบย้อนหลังไม่ได้จริง — ถ้าจะทำ audit log ที่ใช้งานได้จริงตั้งแต่แรก ให้ข้ามไปดูวิธีแก้ที่ถูกต้องใน Step 11 ข้อ 7 ก่อนแล้วค่อยเขียน schema จริง (เอกสารนี้จงใจเขียนแบบผิดไว้ก่อนเพื่อให้เห็นปัญหาชัดเจน)
 
 รัน migration แรก:
 
@@ -390,8 +392,43 @@ export async function requireAdmin() {
 
 6. **หน้าโปรไฟล์ผู้ใช้** (เปลี่ยนรหัสผ่าน + อัปโหลดรูป) — แยก storage root ของรูปโปรไฟล์ออกจากไฟล์เอกสาร (`storage/avatars/` แยกจาก `storage/documents/`), ลบไฟล์เก่าทิ้งทุกครั้งที่อัปโหลดใหม่ (ไม่งั้นไฟล์ขยะสะสม), เปลี่ยนรหัสผ่านต้อง verify รหัสผ่านเดิมก่อนเสมอ
 
-7. **บังคับ format วันที่ให้เหมือนกันทุกเครื่อง** — ถ้าต้องการ fix รูปแบบวันที่ที่ *แสดงผล* (เช่น `dd/mm/yyyy` เสมอ) อย่าใช้ `date.toLocaleDateString(locale)` เพราะ locale ที่มี region เป็นไทย (`th-TH`) จะ default เป็นปีพุทธศักราช (พ.ศ.) ไม่ใช่ ค.ศ. — เขียน format เองจาก `getUTCDate()`/`getUTCMonth()`/`getUTCFullYear()` แทน (**ใช้ UTC getters ไม่ใช่ local getters** ถ้าค่าวันที่ถูกเก็บเป็น UTC midnight จาก `<input type="date">` ไม่งั้นในโซนเวลาที่อยู่หลัง UTC วันที่จะเพี้ยนไปหนึ่งวัน) วิธีนี้ทำให้ component ไม่ต้องเป็น client component หรือกังวลเรื่อง hydration mismatch เลย เพราะ render เหมือนกันทั้ง server/client
+7. **แก้ audit log ให้ "รอด" แม้เอกสารถูกลบ** — ถ้า schema ของ `DocumentAudit` ตอน Step 3 ใช้ `onDelete: Cascade` (แบบที่เขียนไว้ตอนต้น) จะมีปัญหา: log ของ action "DELETE" (ที่บันทึกว่าใครลบเอกสาร) จะถูกลบทิ้งไปพร้อมกับเอกสารที่มันบันทึกไว้ทันทีที่ transaction commit — พูดง่ายๆ คือ audit trail ของการลบจะไม่เคยอยู่รอดเลย วิธีแก้:
+   - เปลี่ยน `documentId` เป็น nullable + `onDelete: SetNull` แทน `Cascade`
+   - เพิ่ม field `documentNumber`/`documentTitle` เป็น **snapshot** — copy ค่ามาเก็บไว้ในแถว log เองตอน insert ไม่ใช่ join เอาจาก `Document` ตอน query (เพราะพอเอกสารถูกลบ join จะไม่มีอะไรให้ดึง)
+   - ถ้ามีข้อมูลเดิมในตารางอยู่แล้วตอนย้าย schema แบบนี้ (`documentNumber NOT NULL` แต่ตารางมีแถวอยู่แล้ว) SQL Server จะปฏิเสธ migration — ต้องแยกเป็น 2 migration file: ไฟล์แรกเพิ่ม column แบบ nullable ก่อน, ไฟล์สอง backfill ค่าจาก `Document` ที่ join ได้ (`UPDATE ... FROM ... INNER JOIN`) แล้วค่อย `ALTER COLUMN ... NOT NULL` — เหตุผลที่ต้องแยกไฟล์: SQL Server compile ทั้ง script เป็น batch เดียว ถ้า `UPDATE` อ้างถึง column ที่เพิ่ง `ADD` ในสคริปต์เดียวกันจะได้ error `Invalid column name` เพราะ column ยังไม่ถูก resolve ในตอน compile
+   - ทุกจุดที่ `documentAudit.create()` ต้องอัปเดตให้ใส่ `documentNumber`/`documentTitle` ด้วย (ไม่ใช่แค่ `documentId`)
+   - เพิ่ม action `"DELETE"` ในชุด action ที่รองรับ (เดิมมักมีแค่ `CREATE`/`DOWNLOAD` — ลบเอกสารก็ต้อง log เหมือนกัน ไม่งั้นจะตรวจสอบไม่ได้ว่าใครลบ)
+   - สร้างหน้า admin แสดง log พร้อม filter (คำค้นหา/action/ผู้ใช้) + pagination — แสดงลิงก์ไปเอกสารได้เฉพาะตอน `documentId` ยังไม่เป็น `null` (เอกสารยังไม่ถูกลบ), ถ้าเป็น `null` ให้โชว์แค่ `documentNumber`/`documentTitle` ที่ snapshot ไว้เฉยๆ
+
+8. **บังคับ format วันที่ให้เหมือนกันทุกเครื่อง** — ถ้าต้องการ fix รูปแบบวันที่ที่ *แสดงผล* (เช่น `dd/mm/yyyy` เสมอ) อย่าใช้ `date.toLocaleDateString(locale)` เพราะ locale ที่มี region เป็นไทย (`th-TH`) จะ default เป็นปีพุทธศักราช (พ.ศ.) ไม่ใช่ ค.ศ. — เขียน format เองจาก `getUTCDate()`/`getUTCMonth()`/`getUTCFullYear()` แทน (**ใช้ UTC getters ไม่ใช่ local getters** ถ้าค่าวันที่ถูกเก็บเป็น UTC midnight จาก `<input type="date">` ไม่งั้นในโซนเวลาที่อยู่หลัง UTC วันที่จะเพี้ยนไปหนึ่งวัน) วิธีนี้ทำให้ component ไม่ต้องเป็น client component หรือกังวลเรื่อง hydration mismatch เลย เพราะ render เหมือนกันทั้ง server/client
    - ข้อควรรู้แยกต่างหาก: **native `<input type="date">` ไม่มีทางบังคับ format การพิมพ์ได้จากโค้ดเว็บ** — format ของช่อง input (`mm/dd/yyyy` vs `dd/mm/yyyy`) เป็นไปตาม region ของ OS/browser ผู้ใช้เสมอ ถ้าอยากบังคับ format การพิมพ์ต้องเปลี่ยนเป็น text input + เขียน validation/parsing เองทั้งหมด ซึ่งแลกกับการเสีย native date picker UI ไป — ปกติไม่คุ้มที่จะทำแค่เพื่อเรื่อง format
+
+9. **ระบบอนุมัติเอกสาร (ล็อกการลบเมื่อ "ถูกต้องแล้ว")** — สำหรับ workflow ที่ต้องการให้เอกสารที่ผ่านการตรวจสอบแล้วลบไม่ได้อีก ยกเว้นหัวหน้างาน:
+   - เพิ่ม role ใหม่ `MANAGER` — ขอบเขตเหมือน `STAFF` ทุกอย่าง (department-scoped, ได้สิทธิ์พิเศษจาก `DocumentTypeAccess` เหมือนกัน) บวกสิทธิ์พิเศษเพิ่มสองอย่าง: อนุมัติเอกสาร + ลบเอกสารที่อนุมัติแล้วได้ (เฉพาะหน่วยงานตัวเอง)
+   - เพิ่ม `approvedAt`/`approvedById` (nullable) ใน `Document`
+   - แยกฟังก์ชันสิทธิ์ให้ชัดว่า "อนุมัติได้" กับ "ลบได้" เป็นคนละเรื่องที่ประกอบกัน:
+     ```ts
+     function canApproveDocument(user, documentDepartmentId) {
+       if (user.role === "ADMIN") return true;
+       return user.role === "MANAGER" && user.departmentId === documentDepartmentId;
+     }
+
+     function canDeleteDocument(user, documentDepartmentId, isApproved) {
+       if (!isApproved) return canManageDocument(user, documentDepartmentId); // กฎเดิม
+       return canApproveDocument(user, documentDepartmentId); // เข้มกว่า เมื่ออนุมัติแล้ว
+     }
+     ```
+   - ปุ่ม "อนุมัติ" แสดงเฉพาะผู้มีสิทธิ์ + เอกสารยังไม่อนุมัติ (`!isApproved && canApproveDocument(...)`) — กดแล้ว set `approvedAt`/`approvedById` + log action `"APPROVE"` ในทรานแซกชันเดียวกัน
+   - **ผลกระทบต้องไล่ทุกจุดที่เคยเช็ค `canManageDocument()` เพื่อโชว์/ซ่อนปุ่มลบ** — ทั้งปุ่มลบเอกสารและปุ่มลบไฟล์แนบต้องเปลี่ยนไปเช็ค `canDeleteDocument()` แทน ไม่ใช่แค่จุดเดียว (พลาดจุดไหนจุดหนึ่งจะกลายเป็นช่องโหว่ที่ลบเอกสารอนุมัติแล้วได้ผ่าน route ที่ลืมแก้)
+   - **ข้อควรระวังตอนเพิ่ม role ใหม่ที่ scope เหมือน role เดิม**: ถ้ามีฟังก์ชันอื่นเช็ค `role !== "STAFF"` ตรงๆ (เช่นตอนคำนวณสิทธิ์ `DocumentTypeAccess` ใน Step 11 ข้อ 4) ต้องไล่แก้ให้ครอบคลุม role ใหม่ด้วย ไม่งั้น role ใหม่จะเสียสิทธิ์ที่ควรมีไปโดยไม่ตั้งใจ (เขียนเป็นฟังก์ชัน `isDepartmentScopedRole(role)` รวมไว้ที่เดียวจะปลอดภัยกว่าเช็คกระจายหลายที่)
+   - (ตอนแรกออกแบบให้เป็น one-way gate — ไม่มีการ "ยกเลิกอนุมัติ" — ภายหลังพบว่าต้องมี ดูข้อ 10 ถัดไป)
+
+10. **แก้ไขเอกสาร (เฉพาะที่ยังไม่อนุมัติ) + ยกเลิกการอนุมัติ** — ตามมาหลัง Step 9 เมื่อพบว่า workflow จริงต้องการให้ STAFF แก้ไขข้อมูล/จัดการไฟล์แนบของเอกสารที่ยังไม่อนุมัติได้ (ไม่ใช่แค่สร้าง/ลบ) และ MANAGER ต้องเปิดเอกสารที่อนุมัติไปแล้วกลับมาแก้ไขได้ในบางกรณี:
+    - เพิ่ม `canEditDocument(user, documentDepartmentId, isApproved)` ใน `access.ts` — logic เหมือน `canDeleteDocument()` ทุกประการ (ยังไม่อนุมัติ → `canManageDocument()`, อนุมัติแล้ว → `canApproveDocument()`) แต่แยกฟังก์ชันไว้ต่างหากเพราะ "แก้ไขได้" กับ "ลบได้" เป็นคนละคำถามที่อาจแยกออกจากกันในอนาคต แม้ตอนนี้กฎจะเหมือนกันก็ตาม
+    - หน้าใหม่ `/documents/[id]/edit` — แก้ได้แค่ `title`/`description`/`documentDate`; **`documentTypeId`/`departmentId` ห้ามแก้** เพราะ `documentNumber` ถูกสร้างจากค่านี้ตอน create แล้ว ถ้าแก้ทีหลังเลขที่เอกสารจะไม่ตรงกับประเภท/หน่วยงานจริงอีกต่อไป (แสดงเป็น read-only แทน dropdown)
+    - Server action `updateDocument` — log action `"UPDATE"`; `uploadDocumentFiles` — เพิ่มไฟล์แนบให้เอกสารเดิม log `"UPDATE"` ต่อไฟล์ (detail=ชื่อไฟล์) ทั้งสองตัวเช็คสิทธิ์ด้วย `canEditDocument()` ก่อนเขียนเสมอ (ไม่พึ่งแค่ UI ซ่อนปุ่ม)
+    - เพิ่มปุ่ม "ยกเลิกการอนุมัติ" (`UnapproveButton.tsx`) แสดงเฉพาะเอกสารที่อนุมัติแล้ว + ผู้ใช้มีสิทธิ์อนุมัติ (`canApproveDocument()` — คนละเอกสารกับ `canEditDocument()` เพราะ "ใครยกเลิกอนุมัติได้" ควรเป็นกลุ่มเดียวกับ "ใครอนุมัติได้" ไม่ใช่กลุ่มเดียวกับ "ใครแก้ไขได้") — กดแล้ว set `approvedAt`/`approvedById` กลับเป็น `null` + log action `"UNAPPROVE"`
+    - ผลคือ flow เต็ม: STAFF สร้าง/แก้ไขได้ตามปกติ → MANAGER อนุมัติ → ล็อกไม่ให้ STAFF แก้ไข/ลบ → ถ้าต้องแก้ไขจริงๆ MANAGER ยกเลิกอนุมัติก่อน → เอกสารกลับมาแก้ไขได้ → อนุมัติใหม่อีกครั้งเมื่อแก้เสร็จ
 
 ---
 
@@ -430,7 +467,7 @@ npm run lint       # ESLint
 | 8 | CRUD เอกสาร | list/create/detail/delete |
 | 9 | Access control | `access.ts`, `require-admin.ts` |
 | 10 | Admin CRUD (หน่วยงาน/ประเภท/ผู้ใช้) | `/admin/*` |
-| 11 | ฟีเจอร์เสริม | เลือกทำตามความจำเป็นจริง |
+| 11 | ฟีเจอร์เสริม (ขนาดไฟล์, พรีวิว, VIEWER, สิทธิ์ข้ามหน่วยงาน, เจ้าของประเภทเอกสาร, โปรไฟล์, audit log ที่รอดจากการลบ, format วันที่, ระบบอนุมัติ+MANAGER) | เลือกทำตามความจำเป็นจริง |
 | 12 | ตรวจสอบต่อเนื่อง | typecheck + build + lint + manual test ทุกครั้ง |
 
-โครงสร้างไฟล์จริงของโปรเจกต์นี้หลังทำครบทุก step อยู่ใน [README.md](README.md) — อ่านคู่กันเพื่อดูว่าแต่ละ step ที่อธิบายไว้ข้างบนสุดท้ายกลายเป็นไฟล์ไหนบ้าง
+โครงสร้างไฟล์จริงของโปรเจกต์นี้หลังทำครบทุก step อยู่ใน [README.md](README.md) — อ่านคู่กันเพื่อดูว่าแต่ละ step ที่อธิบายไว้ข้างบนสุดท้ายกลายเป็นไฟล์ไหนบ้าง ส่วนภาพรวมฟีเจอร์ที่เสร็จแล้วทั้งหมดพร้อม flow การทำงานแบบละเอียด ดูได้ที่ [feature.md](feature.md)

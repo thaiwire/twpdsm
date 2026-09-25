@@ -2,14 +2,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { canDeleteDocument, canApproveDocument, canViewDocument } from "@/lib/access";
+import { canDeleteDocument, canApproveDocument, canEditDocument, canViewDocument } from "@/lib/access";
 import { AppShell } from "@/components/AppShell";
 import { FilePreview } from "@/components/FilePreview";
 import { FormattedDate } from "@/components/FormattedDate";
 import { DeleteButton } from "@/components/DeleteButton";
 import { DeleteDocumentButton } from "@/components/DeleteDocumentButton";
 import { ApproveButton } from "@/components/ApproveButton";
-import { deleteDocument, deleteDocumentAttachment, approveDocument } from "../actions";
+import { UnapproveButton } from "@/components/UnapproveButton";
+import { deleteDocument, deleteDocumentAttachment, approveDocument, unapproveDocument } from "../actions";
 
 export default async function DocumentDetailPage({
   params,
@@ -37,6 +38,8 @@ export default async function DocumentDetailPage({
   const isApproved = doc.approvedAt !== null;
   const canDelete = canDeleteDocument(user, doc.departmentId, isApproved);
   const canApprove = !isApproved && canApproveDocument(user, doc.departmentId);
+  const canUnapprove = isApproved && canApproveDocument(user, doc.departmentId);
+  const canEdit = canEditDocument(user, doc.departmentId, isApproved);
 
   return (
     <AppShell
@@ -57,11 +60,26 @@ export default async function DocumentDetailPage({
               <p className="mt-1 font-mono text-sm text-gray-500">{doc.documentNumber}</p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {canEdit && (
+                <Link
+                  href={`/documents/${doc.id}/edit`}
+                  className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
+                >
+                  แก้ไข
+                </Link>
+              )}
               {canApprove && (
                 <ApproveButton
                   id={doc.id}
                   itemLabel={`เอกสาร ${doc.documentNumber}`}
                   action={approveDocument}
+                />
+              )}
+              {canUnapprove && (
+                <UnapproveButton
+                  id={doc.id}
+                  itemLabel={`เอกสาร ${doc.documentNumber}`}
+                  action={unapproveDocument}
                 />
               )}
               {canDelete && (
